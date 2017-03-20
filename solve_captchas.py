@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 
 from multiprocessing.managers import BaseManager
-from pogo_async import PGoApi, exceptions as ex
-from pogo_async.auth_ptc import AuthPtc
-from pogo_async.session import Session
 from asyncio import get_event_loop, sleep
 from random import uniform
+from time import time
+
 from selenium import webdriver
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
-from time import time
+from aiopogo import PGoApi, close_sessions, activate_hash_server, exceptions as ex
+from aiopogo.auth_ptc import AuthPtc
 
-import socket
-
-from monocle import config
-from monocle.utils import random_altitude, get_device_info, get_address, LAT_MEAN, LON_MEAN
+from monocle import sanitized as conf
+from monocle.utils import random_altitude, get_device_info, get_address, randomize_point
+from monocle.bounds import center
 
 
 async def solve_captcha(url, api, driver, timestamp):
@@ -31,18 +30,18 @@ async def solve_captcha(url, api, driver, timestamp):
     request.get_buddy_walked()
     request.check_challenge()
 
-    for attempt in range(-1, config.MAX_RETRIES):
+    for attempt in range(-1, conf.MAX_RETRIES):
         try:
             response = await request.call()
             return response['responses']['VERIFY_CHALLENGE']['success']
         except (ex.HashServerException, ex.MalformedResponseException, ex.ServerBusyOrOfflineException) as e:
-            if attempt == config.MAX_RETRIES - 1:
+            if attempt == conf.MAX_RETRIES - 1:
                 raise
             else:
                 print('{}, trying again soon.'.format(e))
                 await sleep(4)
         except ex.NianticThrottlingException:
-            if attempt == config.MAX_RETRIES - 1:
+            if attempt == conf.MAX_RETRIES - 1:
                 raise
             else:
                 print('Throttled, trying again in 11 seconds.')
@@ -53,23 +52,15 @@ async def solve_captcha(url, api, driver, timestamp):
 
 async def main():
     try:
-        if hasattr(config, 'AUTHKEY'):
-            authkey = config.AUTHKEY
-        else:
-            authkey = b'm3wtw0'
-
-        if hasattr(config, 'HASH_KEY'):
-            HASH_KEY = config.HASH_KEY
-        else:
-            HASH_KEY = None
-
         class AccountManager(BaseManager): pass
         AccountManager.register('captcha_queue')
         AccountManager.register('extra_queue')
-        manager = AccountManager(address=get_address(), authkey=authkey)
+        manager = AccountManager(address=get_address(), authkey=conf.AUTHKEY)
         manager.connect()
         captcha_queue = manager.captcha_queue()
         extra_queue = manager.extra_queue()
+
+        activate_hash_server(conf.HASH_KEY)
 
         driver = webdriver.Chrome()
         driver.set_window_size(803, 807)
@@ -86,15 +77,12 @@ async def main():
                 except IndexError:
                     alt = random_altitude()
             else:
-                lat = uniform(LAT_MEAN - 0.001, LAT_MEAN + 0.001)
-                lon = uniform(LON_MEAN - 0.001, LON_MEAN + 0.001)
+                lat, lon = randomize_point(center, 0.0001)
                 alt = random_altitude()
 
             try:
                 device_info = get_device_info(account)
                 api = PGoApi(device_info=device_info)
-                if HASH_KEY:
-                    api.activate_hash_server(HASH_KEY)
                 api.set_position(lat, lon, alt)
 
                 authenticated = False
@@ -113,7 +101,11 @@ async def main():
                                                  provider=account.get('provider', 'ptc'))
 
                 request = api.create_request()
-                request.download_remote_config_version(platform=1, app_version=5302)
+                await request.call()
+
+                await sleep(.6)
+
+                request.download_remote_config_version(platform=1, app_version=5704)
                 request.check_challenge()
                 request.get_hatched_eggs()
                 request.get_inventory()
@@ -121,10 +113,6 @@ async def main():
                 request.download_settings()
                 response = await request.call()
                 account['time'] = time()
-
-                if response['status_code'] == 3:
-                    print('{} appears to be banned.'.format(username))
-                    continue
 
                 responses = response['responses']
                 challenge_url = responses['CHECK_CHALLENGE']['challenge_url']
@@ -160,8 +148,8 @@ async def main():
                 print('Authentication error on {}: {}'.format(username, e))
                 captcha_queue.put(account)
                 await sleep(3)
-            except ex.PgoapiError as e:
-                print('pgoapi error on {}: {}'.format(username, e))
+            except ex.AiopogoError as e:
+                print('aiopogo error on {}: {}'.format(username, e))
                 captcha_queue.put(account)
                 await sleep(3)
             except Exception:
@@ -170,7 +158,7 @@ async def main():
     finally:
         try:
             driver.close()
-            Session.close()
+            close_sessions()
         except Exception:
             pass
 

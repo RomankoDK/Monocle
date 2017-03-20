@@ -4,11 +4,12 @@ DB_ENGINE = 'sqlite:///db.sqlite'
 #DB_ENGINE = 'mysql://user:pass@localhost/monocle'
 #DB_ENGINE = 'postgresql://user:pass@localhost/monocle
 
-AREA_NAME = 'SLC'   # the city or region you are scanning
-LANGUAGE = 'EN'     # ISO 639-1 codes EN, DE, FR, and ZH for Pokémon names.
-MAX_CAPTCHAS = 100  # stop launching new visits if this many CAPTCHAs are pending
-SCAN_DELAY = 10     # wait at least this many seconds before scanning with the same account
-SPEED_LIMIT = 19    # don't travel over this many miles per hour (sorry non-Americans)
+AREA_NAME = 'SLC'     # the city or region you are scanning
+LANGUAGE = 'EN'       # ISO 639-1 codes EN, DE, FR, and ZH for Pokémon names.
+MAX_CAPTCHAS = 100    # stop launching new visits if this many CAPTCHAs are pending
+SCAN_DELAY = 10       # wait at least this many seconds before scanning with the same account
+SPEED_UNIT = 'miles'  # valid options are 'miles', 'kilometers', 'meters'
+SPEED_LIMIT = 19.5    # limit worker speed to this many SPEED_UNITs per hour
 
 # The number of simultaneous workers will be these two numbers multiplied.
 # On the initial run, workers will arrange themselves in a grid across the
@@ -27,13 +28,21 @@ MAP_END = (40.7143, -111.8046)
 STAY_WITHIN_MAP = True
 
 # ensure that you visit within this many meters of every part of your map during bootstrap
-#BOOTSTRAP_RADIUS = 450
+# lower values are more thorough but will take longer
+BOOTSTRAP_RADIUS = 120
 
 GIVE_UP_KNOWN = 75   # try to find a worker for a known spawn for this many seconds before giving up
 GIVE_UP_UNKNOWN = 60 # try to find a worker for an unknown point for this many seconds before giving up
 SKIP_SPAWN = 90      # don't even try to find a worker for a spawn if the spawn time was more than this many seconds ago
 
-# the directory that the pickles folder, socket, etc. will go in
+# How often should the mystery queue be reloaded (default 90s)
+# this will reduce the grouping of workers around the last few mysteries
+#RESCAN_UNKNOWN = 90
+
+# filename of accounts CSV
+ACCOUNTS_CSV = 'accounts.csv'
+
+# the directory that the pickles folder, socket, CSV, etc. will go in
 # defaults to working directory if not set
 #DIRECTORY = None
 
@@ -46,6 +55,14 @@ SIMULTANEOUS_LOGINS = 4
 # Limit the number of workers simulating the app startup process simultaneously.
 SIMULTANEOUS_SIMULATION = 10
 
+# Immediately select workers whose speed are below (SPEED_UNIT)p/h instead of
+# continuing to try to find the worker with the lowest speed.
+# May increase clustering if you have a high density of workers.
+GOOD_ENOUGH = 0.1
+
+# Seconds to sleep after failing to find an eligible worker before trying again.
+SEARCH_SLEEP = 2.5
+
 ## alternatively define a Polygon to use as boundaries (requires shapely)
 ## if BOUNDARIES is set, STAY_WITHIN_MAP will be ignored
 ## more information available in the shapely manual:
@@ -53,29 +70,22 @@ SIMULTANEOUS_SIMULATION = 10
 #from shapely.geometry import Polygon
 #BOUNDARIES = Polygon(((40.799609, -111.948556), (40.792749, -111.887341), (40.779264, -111.838078), (40.761410, -111.817908), (40.728636, -111.805293), (40.688833, -111.785564), (40.689768, -111.919389), (40.750461, -111.949938)))
 
-# If accounts use the same provider and password you can set defaults here
-# and omit them from the accounts list.
-#PASS = 'pik4chu'
-#PROVIDER = 'ptc'
-
-### Device information will be generated for you if you do not provide it.
-### Account details are automatically retained in pickles/accounts.pickle
-## valid account formats (without PASS and PROVIDER set):
-# (username, password, provider, iPhone, iOS, device_id)
-# (username, password, provider)
-## valid account formats (with PASS and PROVIDER set):
-# (username, iPhone, iOS, device_id)
-# [username]
-ACCOUNTS = [
-    ('ash_ketchum', 'pik4chu', 'ptc'),
-    ('ziemniak_kalafior', 'ogorek', 'google'),
-    ('noideawhattoputhere', 's3cr3t', 'ptc'),
-    ('misty', 'bulbus4ur', 'ptc')
-]
-
 # key for Bossland's hashing server, otherwise the old hashing lib will be used
 #HASH_KEY = '9d87af14461b93cb3605'  # this key is fake
 
+# Skip PokéStop spinning and egg incubation if your request rate is too high
+# for your hashing subscription.
+# e.g.
+#   75/150 hashes available 35/60 seconds passed => fine
+#   70/150 hashes available 30/60 seconds passed => throttle (only scan)
+# value: how many requests to keep as spare (0.1 = 10%), False to disable
+#SMART_THROTTLE = 0.1
+
+# Swap the worker that has seen the fewest Pokémon every x seconds
+# Defaults to whatever will allow every worker to be swapped within 6 hours
+#SWAP_OLDEST = 300  # 5 minutes
+# Only swap if it's been active for more than x minutes
+#MINIMUM_RUNTIME = 10
 
 ### these next 6 options use more requests but look more like the real client
 APP_SIMULATION = True     # mimic the actual app's login requests
@@ -94,8 +104,7 @@ SPIN_POKESTOPS = False # spin all PokéStops that are within range
 SPIN_COOLDOWN = 300    # spin only one PokéStop every n seconds (default 300)
 
 # minimum number of each item to keep if the bag is cleaned
-# remove or set to None to disable bag cleaning
-# automatically disabled if SPIN_POKESTOPS is disabled
+# bag cleaning is disabled if this is not present or is commented out
 ''' # triple quotes are comments, remove them to use this ITEM_LIMITS example
 ITEM_LIMITS = {
     1:    20,  # Poké Ball
@@ -107,14 +116,18 @@ ITEM_LIMITS = {
     104:  40,  # Max Potion
     201:   0,  # Revive
     202:  40,  # Max Revive
+    701:  20,  # Razz Berry
+    702:  20,  # Bluk Berry
+    703:  20,  # Nanab Berry
+    704:  20,  # Wepar Berry
+    705:  20,  # Pinap Berry
 }
 '''
 
-# Swap the worker that has seen the fewest Pokémon every x seconds
-SWAP_WORST = 600  # 10 minutes
-
 # Update the console output every x seconds
-REFRESH_RATE = 0.5  # 500ms
+REFRESH_RATE = 0.75  # 750ms
+# Update the seen/speed/visit/speed stats every x seconds
+STAT_REFRESH = 5
 
 # sent with GET_PLAYER requests, should match your region
 PLAYER_LOCALE = {'country': 'US', 'language': 'en', 'timezone': 'America/Denver'}
@@ -126,15 +139,15 @@ MAX_RETRIES = 3
 LOGIN_TIMEOUT = 2.5
 
 # add spawn points reported in cell_ids to the unknown spawns list
-# disable if your workers already have more than enough points to visit
-MORE_POINTS = True
+#MORE_POINTS = False
 
 # Set to True to kill the scanner when a newer version is forced
 #FORCED_KILL = False
 
 # exclude these Pokémon from the map by default (only visible in trash layer)
 TRASH_IDS = (
-    16, 19, 21, 29, 32, 41, 46, 48, 50, 52, 56, 74, 77, 96, 111, 133
+    16, 19, 21, 29, 32, 41, 46, 48, 50, 52, 56, 74, 77, 96, 111, 133,
+    161, 163, 167, 177, 183, 191, 194
 )
 
 # include these Pokémon on the "rare" report
@@ -143,27 +156,38 @@ RARE_IDS = (
 )
 
 from datetime import datetime
-REPORT_SINCE = datetime(2016, 12, 17)  # base reports on data from after this date
+REPORT_SINCE = datetime(2017, 2, 17)  # base reports on data from after this date
 
 # used for altitude queries and maps in reports
-GOOGLE_MAPS_KEY = 'OYOgW1wryrp2RKJ81u7BLvHfYUA6aArIyuQCXu4'  # this key is fake
-#ALT_RANGE = (1250, 1450)  # Fall back to altitudes in this range if Google query fails
+#GOOGLE_MAPS_KEY = 'OYOgW1wryrp2RKJ81u7BLvHfYUA6aArIyuQCXu4'  # this key is fake
 REPORT_MAPS = True  # Show maps on reports
+#ALT_RANGE = (1250, 1450)  # Fall back to altitudes in this range if Google query fails
+
+## Round altitude coordinates to this many decimal places
+## More precision will lead to larger caches and more Google API calls
+## Maximum distance from coords to rounded coords for precisions (at Lat40):
+## 1: 7KM, 2: 700M, 3: 70M, 4: 7M
+#ALT_PRECISION = 2
 
 ## Automatically resolve captchas using 2Captcha key.
 #CAPTCHA_KEY = '1abc234de56fab7c89012d34e56fa7b8'
 ## the number of CAPTCHAs an account is allowed to receive before being swapped out
 #CAPTCHAS_ALLOWED = 3
+## Get new accounts from the CAPTCHA queue first if it's not empty
+#FAVOR_CAPTCHA = True
 
-MAP_WORKERS = True  # allow displaying the live location of workers on the map
+# allow displaying the live location of workers on the map
+MAP_WORKERS = True
+# filter these Pokemon from the map to reduce traffic and browser load
+#MAP_FILTER_IDS = [161, 165, 16, 19, 167]
 
 # unix timestamp of last spawn point migration, spawn times learned before this will be ignored
 LAST_MIGRATION = 1481932800  # Dec. 17th, 2016
 
 ## Map data provider and appearance, previews available at:
 ## https://leaflet-extras.github.io/leaflet-providers/preview/
-#MAP_PROVIDER_URL = '//{s}.tile.osm.org/{z}/{x}/{y}.png'
-#MAP_PROVIDER_ATTRIBUTION = '&copy; <a href="http://osm.org/copyright">OpenStreetMap</a> contributors'
+#MAP_PROVIDER_URL = '//{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
+#MAP_PROVIDER_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
 
 # set of proxy addresses and ports
 # SOCKS requires aiosocks to be installed
@@ -175,21 +199,37 @@ LAST_MIGRATION = 1481932800  # Dec. 17th, 2016
 
 # Bytestring key to authenticate with manager for inter-process communication
 #AUTHKEY = b'm3wtw0'
-# Address to use for manager, leave unset or set to None if you're note sure.
+# Address to use for manager, leave commented if you're not sure.
 #MANAGER_ADDRESS = r'\\.\pipe\monocle'  # must be in this format for Windows
 #MANAGER_ADDRESS = 'monocle.sock'       # the socket name for Unix systems
-#MANAGER_ADDRESS = ('127.0.0.1', 5002)    # could be used for CAPTCHA solving and live worker maps on remote systems
+#MANAGER_ADDRESS = ('127.0.0.1', 5002)  # could be used for CAPTCHA solving and live worker maps on remote systems
 
 # Store the cell IDs so that they don't have to be recalculated every visit.
-# Highly recommended unless you don't have enough memory for them.
-# Disabling will increase processor usage.
-#CACHE_CELLS = True
+# Enabling will increase memory usage.
+#CACHE_CELLS = False
 
 # Only for use with web-sanic (requires PostgreSQL)
 #DB = {'host': '127.0.0.1', 'user': 'monocle_role', 'password': 'pik4chu', 'port': '5432', 'database': 'monocle'}
 
 # Disable to use Python's event loop even if uvloop is installed
 #UVLOOP = True
+
+# The number of coroutines that are allowed to run simultaneously.
+#COROUTINES_LIMIT = GRID[0] * GRID[1]
+
+### FRONTEND CONFIGURATION
+LOAD_CUSTOM_HTML_FILE = False # File path MUST be 'templates/custom.html'
+LOAD_CUSTOM_CSS_FILE = False  # File path MUST be 'static/css/custom.css'
+LOAD_CUSTOM_JS_FILE = False  # File path MUST be 'static/js/custom.js'
+
+#FB_PAGE_ID = None
+#TWITTER_SCREEN_NAME = None  # Username withouth '@' char
+#DISCORD_INVITE_ID = None
+#TELEGRAM_USERNAME = None  # Username withouth '@' char
+
+## Variables below will be used as default values on frontend
+FIXED_OPACITY = False  # Make marker opacity independent of remaining time
+SHOW_TIMER = False  # Show remaining time on a label under each pokemon marker
 
 ### OPTIONS BELOW THIS POINT ARE ONLY NECESSARY FOR NOTIFICATIONS ###
 NOTIFY = False  # enable notifications
@@ -244,12 +284,8 @@ FULL_TIME = 1800  # the number of seconds after a notification when only MINIMUM
 INITIAL_SCORE = 0.7  # the required score immediately after a notification
 MINIMUM_SCORE = 0.4  # the required score after FULL_TIME seconds have passed
 
-# the number of encounter_ids to retain for duplicate checking. Should be at
-# least as high as the highest number of notifications you'd send in an hour.
-NOTIFICATION_CACHE = 100
-
 ### The following values are fake, replace them with your own keys to enable
-### notifications, otherwise leave them out of your config or set them to None.
+### notifications, otherwise exclude them from your config
 ### You must provide keys for at least one service to use notifications.
 
 #PB_API_KEY = 'o.9187cb7d5b857c97bfcaa8d63eaa8494'
@@ -314,13 +350,3 @@ NOTIFICATION_CACHE = 100
 #LANDMARKS.add('the University of Utah', shortname='the U of U', hashtags={'Utes'}, phrase='at', is_area=True)
 ## provide corner points to create a polygon of the area since OpenStreetMap does not have a shape for it
 #LANDMARKS.add('Yalecrest', points=((40.750263, -111.836502), (40.750377, -111.851108), (40.751515, -111.853833), (40.741212, -111.853909), (40.741188, -111.836519)), is_area=True)
-
-### FRONTEND CONFIGURATION
-LOAD_CUSTOM_HTML_FILE = False # File path MUST be 'templates/custom.html'
-LOAD_CUSTOM_CSS_FILE = False  # File path MUST be 'static/css/custom.css'
-LOAD_CUSTOM_JS_FILE = False  # File path MUST be 'static/js/custom.js'
-
-FB_PAGE_ID = None
-TWITTER_SCREEN_NAME = None  # Username withouth '@' char
-DISCORD_INVITE_ID = None
-TELEGRAM_USERNAME = None  # Username withouth '@' char

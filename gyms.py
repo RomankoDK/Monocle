@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 from datetime import datetime, timedelta
 from pkg_resources import resource_filename
 
@@ -6,9 +8,10 @@ import argparse
 
 from flask import Flask, render_template
 
-from monocle import config, db, utils
+from monocle import db, sanitized as conf
 from monocle.names import POKEMON_NAMES
 from monocle.web_utils import get_args
+from monocle.bounds import area
 
 
 app = Flask(__name__, template_folder=resource_filename('monocle', 'templates'))
@@ -100,8 +103,8 @@ def index():
     styles = {1: 'primary', 2: 'danger', 3: 'warning'}
     return render_template(
         'gyms.html',
-        area_name=config.AREA_NAME,
-        area_size=utils.get_scan_area(),
+        area_name=conf.AREA_NAME,
+        area_size=area,
         minutes_ago=int((datetime.now() - stats['generated_at']).seconds / 60),
         last_date_minutes_ago=int((time.time() - stats['last_date']) / 60),
         team_names=team_names,

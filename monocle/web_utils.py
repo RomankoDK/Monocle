@@ -3,12 +3,23 @@ from datetime import datetime
 from multiprocessing.managers import BaseManager, RemoteError
 from contextlib import contextmanager
 
-from monocle import config, db, utils
+from monocle import db, utils, sanitized as conf
 from monocle.names import POKEMON_NAMES, MOVES, POKEMON_MOVES
 
-if config.BOUNDARIES:
+if conf.BOUNDARIES:
     from shapely.geometry import mapping
 
+if conf.MAP_WORKERS:
+    try:
+        UNIT = getattr(utils.Units, conf.SPEED_UNIT.lower())
+        if UNIT is utils.Units.miles:
+            UNIT_STRING = "MPH"
+        elif UNIT is utils.Units.kilometers:
+            UNIT_STRING = "KMH"
+        elif UNIT is utils.Units.meters:
+            UNIT_STRING = "m/h"
+    except AttributeError:
+        UNIT_STRING = "MPH"
 
 def get_args():
     parser = ArgumentParser()
@@ -39,7 +50,7 @@ AccountManager.register('worker_dict')
 class Workers:
     def __init__(self):
         self._data = {}
-        self._manager = AccountManager(address=utils.get_address(), authkey=config.AUTHKEY)
+        self._manager = AccountManager(address=utils.get_address(), authkey=conf.AUTHKEY)
 
     def connect(self):
         try:
@@ -68,11 +79,10 @@ def get_worker_markers(workers):
     for worker_no, data in workers.data:
         coords = data[0]
         unix_time = data[1]
-        speed = '{:.1f}mph'.format(data[2])
+        speed = '{:.1f}{}'.format(data[2], UNIT_STRING)
         total_seen = data[3]
         visits = data[4]
         seen_here = data[5]
-        sent_notification = data[6]
         time = datetime.fromtimestamp(unix_time).strftime('%I:%M:%S %p').lstrip('0')
         markers.append({
             'lat': coords[0],
@@ -82,20 +92,19 @@ def get_worker_markers(workers):
             'speed': speed,
             'total_seen': total_seen,
             'visits': visits,
-            'seen_here': seen_here,
-            'sent_notification': sent_notification
+            'seen_here': seen_here
         })
     return markers
 
 
-def get_pokemarkers():
+def get_pokemarkers(after_id=0):
     markers = []
     with db.session_scope() as session:
-        pokemons = db.get_sightings(session)
+        pokemons = db.get_sightings(session, after_id)
         for pokemon in pokemons:
             content = {
                 'id': 'pokemon-{}'.format(pokemon.id),
-                'trash': pokemon.pokemon_id in config.TRASH_IDS,
+                'trash': pokemon.pokemon_id in conf.TRASH_IDS,
                 'name': POKEMON_NAMES[pokemon.pokemon_id],
                 'pokemon_id': pokemon.pokemon_id,
                 'lat': pokemon.lat,
@@ -107,8 +116,8 @@ def get_pokemarkers():
                     'atk': pokemon.atk_iv,
                     'def': pokemon.def_iv,
                     'sta': pokemon.sta_iv,
-                    'move1': POKEMON_MOVES[pokemon.move_1],
-                    'move2': POKEMON_MOVES[pokemon.move_2],
+                    'move1': POKEMON_MOVES.get(pokemon.move_1, pokemon.move_1),
+                    'move2': POKEMON_MOVES.get(pokemon.move_2, pokemon.move_2),
                     'damage1': MOVES.get(pokemon.move_1, {}).get('damage'),
                     'damage2': MOVES.get(pokemon.move_2, {}).get('damage'),
                 }
@@ -154,25 +163,28 @@ def get_spawnpoint_markers():
             })
         return markers
 
-
-def get_scan_coords():
-    markers = []
-    if config.BOUNDARIES:
-        coordinates = mapping(config.BOUNDARIES)['coordinates']
+if conf.BOUNDARIES:
+    def get_scan_coords():
+        markers = []
+        coordinates = mapping(conf.BOUNDARIES)['coordinates']
         coords = coordinates[0]
         for blacklist in coordinates[1:]:
             markers.append({
                     'type': 'scanblacklist',
                     'coords': blacklist
                 })
-    else:
-        coords = (config.MAP_START, (config.MAP_START[0], config.MAP_END[1]), config.MAP_END, (config.MAP_END[0], config.MAP_START[1]), config.MAP_START)
-
-    markers.append({
+        markers.append({
+                'type': 'scanarea',
+                'coords': coords
+            })
+        return markers
+else:
+    def get_scan_coords():
+        return ({
             'type': 'scanarea',
-            'coords': coords
-        })
-    return markers
+            'coords': (conf.MAP_START, (conf.MAP_START[0], conf.MAP_END[1]),
+                       conf.MAP_END, (conf.MAP_END[0], conf.MAP_START[1]), conf.MAP_START)
+        },)
 
 
 def get_pokestop_markers():

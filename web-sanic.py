@@ -13,43 +13,38 @@ from sanic.response import html, json
 from jinja2 import Environment, PackageLoader, Markup
 from asyncpg import create_pool
 
-from monocle import config, db, utils
+from monocle import db, sanitized as conf
+from monocle.bounds import center
 from monocle.names import POKEMON_NAMES, MOVES, POKEMON_MOVES
-
-
-# Set defaults for missing config options
-_optional = {
-    'AREA_NAME': 'area',
-    'GOOGLE_MAPS_KEY': None,
-    'RARE_IDS': (),
-    'TRASH_IDS': (),
-    'MAP_PROVIDER_URL': '//{s}.tile.osm.org/{z}/{x}/{y}.png',
-    'MAP_PROVIDER_ATTRIBUTION': '&copy; <a href="http://osm.org/copyright">OpenStreetMap</a> contributors',
-    'MAP_WORKERS': True,
-    'AUTHKEY': b'm3wtw0',
-    'REPORT_MAPS': True,
-    'LOAD_CUSTOM_HTML_FILE': False,
-    'LOAD_CUSTOM_CSS_FILE': False,
-    'LOAD_CUSTOM_JS_FILE': False,
-    'FB_PAGE_ID': None,
-    'TWITTER_SCREEN_NAME': None,
-    'DISCORD_INVITE_ID': None,
-    'TELEGRAM_USERNAME': None,
-    'BOUNDARIES': None
-}
-for setting_name, default in _optional.items():
-    if not hasattr(config, setting_name):
-        setattr(config, setting_name, default)
-del _optional
-
 from monocle.web_utils import get_scan_coords, get_worker_markers, Workers, get_args
 
 
-if not config.REPORT_MAPS:
-    config.GOOGLE_MAPS_KEY = None
+GOOGLE_MAPS_KEY = conf.GOOGLE_MAPS_KEY if conf.REPORT_MAPS else None
+MAPFILE = 'custom.html' if conf.LOAD_CUSTOM_HTML_FILE else 'newmap.html'
+
+CSS_JS = ''
+SOCIAL_LINKS = ''
+JS_VARS = Markup(
+    "_defaultSettings['FIXED_OPACITY'] = '{:d}'; "
+    "_defaultSettings['SHOW_TIMER'] = '{:d}'; "
+    "_defaultSettings['TRASH_IDS'] = [{}]; ".format(conf.FIXED_OPACITY, conf.SHOW_TIMER, ', '.join(str(p_id) for p_id in conf.TRASH_IDS))
+)
+if conf.LOAD_CUSTOM_CSS_FILE:
+    CSS_JS += '<link rel="stylesheet" href="static/css/custom.css">'
+if conf.LOAD_CUSTOM_JS_FILE:
+    CSS_JS += '<script type="text/javascript" src="static/js/custom.js"></script>'
+if conf.FB_PAGE_ID:
+    SOCIAL_LINKS += '<a class="map_btn facebook-icon" target="_blank" href="https://www.facebook.com/' + conf.FB_PAGE_ID + '"></a>'
+if conf.TWITTER_SCREEN_NAME:
+    SOCIAL_LINKS += '<a class="map_btn twitter-icon" target="_blank" href="https://www.twitter.com/' + conf.TWITTER_SCREEN_NAME + '"></a>'
+if conf.DISCORD_INVITE_ID:
+    SOCIAL_LINKS += '<a class="map_btn discord-icon" target="_blank" href="https://discord.gg/' + conf.DISCORD_INVITE_ID + '"></a>'
+if conf.TELEGRAM_USERNAME:
+    SOCIAL_LINKS += '<a class="map_btn telegram-icon" target="_blank" href="https://www.telegram.me/' + conf.TELEGRAM_USERNAME + '"></a>'
+CSS_JS = Markup(CSS_JS)
+SOCIAL_LINKS = Markup(SOCIAL_LINKS)
 
 env = Environment(loader=PackageLoader('monocle', 'templates'), enable_async=True)
-
 app = Sanic(__name__)
 app.static('/static', resource_filename('monocle', 'static'))
 
@@ -64,47 +59,23 @@ def jsonify(records):
 
 @app.route('/')
 async def fullmap(request):
-    extra_css_js = ''
-    social_links = ''
-
-    if config.LOAD_CUSTOM_HTML_FILE:
-        mapfile = 'custom.html'
-    else:
-        mapfile = 'newmap.html'
-
-    if config.LOAD_CUSTOM_CSS_FILE:
-        extra_css_js += '<link rel="stylesheet" href="static/css/custom.css">'
-
-    if config.LOAD_CUSTOM_JS_FILE:
-        extra_css_js += '<script type="text/javascript" src="static/js/custom.js"></script>'
-
-    if config.FB_PAGE_ID:
-        social_links += '<a class="map_btn facebook-icon" target="_blank" href="https://www.facebook.com/' + config.FB_PAGE_ID + '"></a>'
-
-    if config.TWITTER_SCREEN_NAME:
-        social_links += '<a class="map_btn twitter-icon" target="_blank" href="https://www.twitter.com/' + config.TWITTER_SCREEN_NAME + '"></a>'
-
-    if config.DISCORD_INVITE_ID:
-        social_links += '<a class="map_btn discord-icon" target="_blank" href="https://discord.gg/' + config.DISCORD_INVITE_ID + '"></a>'
-
-    if config.TELEGRAM_USERNAME:
-        social_links += '<a class="map_btn telegram-icon" target="_blank" href="https://www.telegram.me/' + config.TELEGRAM_USERNAME + '"></a>'
-
-    template = env.get_template(mapfile)
+    template = env.get_template(MAPFILE)
     html_content = await template.render_async(
-        area_name=config.AREA_NAME,
-        map_center=utils.MAP_CENTER,
-        map_provider_url=config.MAP_PROVIDER_URL,
-        map_provider_attribution=config.MAP_PROVIDER_ATTRIBUTION,
-        social_links=Markup(social_links),
-        extra_css_js=Markup(extra_css_js)
+        area_name=conf.AREA_NAME,
+        map_center=center,
+        map_provider_url=conf.MAP_PROVIDER_URL,
+        map_provider_attribution=conf.MAP_PROVIDER_ATTRIBUTION,
+        social_links=SOCIAL_LINKS,
+        init_js_vars=JS_VARS,
+        extra_css_js=CSS_JS
     )
     return html(html_content)
 
 
 @app.route('/data')
 async def pokemon_data(request):
-    return json(await get_pokemarkers_async())
+    last_id = request.args.get('last_id', 0)
+    return json(await get_pokemarkers_async(last_id))
 
 
 @app.route('/gym_data')
@@ -127,7 +98,7 @@ async def scan_coords(request):
     return json(get_scan_coords())
 
 
-if config.MAP_WORKERS:
+if conf.MAP_WORKERS:
     workers = Workers()
 
 
@@ -141,30 +112,30 @@ if config.MAP_WORKERS:
         template = env.get_template('workersmap.html')
 
         html_content = await template.render_async(
-            area_name=config.AREA_NAME,
-            map_center = utils.MAP_CENTER,
-            map_provider_url=config.MAP_PROVIDER_URL,
-            map_provider_attribution=config.MAP_PROVIDER_ATTRIBUTION
+            area_name=conf.AREA_NAME,
+            map_center=center,
+            map_provider_url=conf.MAP_PROVIDER_URL,
+            map_provider_attribution=conf.MAP_PROVIDER_ATTRIBUTION
         )
         return html(html_content)
 
 
-async def get_pokemarkers_async():
+async def get_pokemarkers_async(after_id):
     markers = []
 
-    async with create_pool(**config.DB) as pool:
+    async with create_pool(**conf.DB) as pool:
         async with pool.acquire() as conn:
             async with conn.transaction():
                 results = await conn.fetch('''
                     SELECT id, pokemon_id, expire_timestamp, lat, lon, atk_iv, def_iv, sta_iv, move_1, move_2
                     FROM sightings
-                    WHERE expire_timestamp > {}
-                '''.format(time.time()))
+                    WHERE expire_timestamp > {ts} AND id > {poke_id}
+                '''.format(ts=time.time(), poke_id=after_id))
 
                 for row in results:
                     content = {
                         'id': 'pokemon-{}'.format(row[0]),
-                        'trash': row[1] in config.TRASH_IDS,
+                        'trash': row[1] in conf.TRASH_IDS,
                         'name': POKEMON_NAMES[row[1]],
                         'pokemon_id': row[1],
                         'lat': row[3],
@@ -188,7 +159,7 @@ async def get_pokemarkers_async():
 async def get_gyms_async():
     markers = []
 
-    async with create_pool(**config.DB) as pool:
+    async with create_pool(**conf.DB) as pool:
         async with pool.acquire() as conn:
             async with conn.transaction():
                 results = await conn.fetch('''
@@ -228,7 +199,7 @@ async def get_gyms_async():
 
 
 async def get_spawnpoints_async():
-    async with create_pool(**config.DB) as pool:
+    async with create_pool(**conf.DB) as pool:
         async with pool.acquire() as conn:
             async with conn.transaction():
                 results = await conn.fetch('SELECT spawn_id, despawn_time, lat, lon, duration FROM spawnpoints')
@@ -236,7 +207,7 @@ async def get_spawnpoints_async():
 
 
 async def get_pokestops_async():
-    async with create_pool(**config.DB) as pool:
+    async with create_pool(**conf.DB) as pool:
         async with pool.acquire() as conn:
             async with conn.transaction():
                 results = await conn.fetch('SELECT external_id, lat, lon FROM pokestops')

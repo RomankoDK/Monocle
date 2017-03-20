@@ -1,67 +1,41 @@
 from datetime import datetime
 from collections import OrderedDict
 from contextlib import contextmanager
+from enum import Enum
 
-import enum
 import time
 
 from sqlalchemy import Column, Integer, String, Float, SmallInteger, BigInteger, ForeignKey, UniqueConstraint, create_engine, cast, func, desc, asc, and_, exists
-from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.types import TypeDecorator, Numeric, Text
-from sqlalchemy.dialects.mysql import TINYINT, MEDIUMINT, BIGINT
+from sqlalchemy.dialects.mysql import TINYINT, MEDIUMINT, BIGINT, DOUBLE
+from sqlalchemy.dialects.postgresql import DOUBLE_PRECISION
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm.exc import NoResultFound
 
-from . import utils, shared, config
-
-try:
-    DB_ENGINE = config.DB_ENGINE
-except AttributeError:
-    DB_ENGINE = 'sqlite:///db.sqlite'
-
-_optional = {
-    'LAST_MIGRATION': 1481932800,
-    'SPAWN_ID_INT': True,
-    'RARE_IDS': [],
-    'REPORT_SINCE': None,
-    'BOUNDARIES': None,
-    'STAY_WITHIN_MAP': True,
-    'MORE_POINTS': True
-}
-for setting_name, default in _optional.items():
-    if not hasattr(config, setting_name):
-        setattr(config, setting_name, default)
-del _optional
-
-if config.BOUNDARIES:
-    try:
-        from shapely.geometry import Polygon, Point
-
-        if not isinstance(config.BOUNDARIES, Polygon):
-            raise TypeError('BOUNDARIES must be a shapely Polygon.')
-    except ImportError as e:
-        raise ImportError('BOUNDARIES is set but shapely is not available.') from e
+from . import utils, bounds, spawns, db_proc, sanitized as conf
+from .shared import call_at
 
 try:
-    if config.LAST_MIGRATION > time.time():
-        raise ValueError('LAST_MIGRATION must be a timestamp from the past.')
+    assert conf.LAST_MIGRATION < time.time()
+except AssertionError:
+    raise ValueError('LAST_MIGRATION must be a timestamp from the past.')
 except TypeError as e:
     raise TypeError('LAST_MIGRATION must be a numeric timestamp.') from e
 
 
-class Team(enum.Enum):
+class Team(Enum):
     none = 0
     mystic = 1
     valor = 2
     instict = 3
 
 
-if DB_ENGINE.startswith('mysql'):
+if conf.DB_ENGINE.startswith('mysql'):
     TINY_TYPE = TINYINT(unsigned=True)          # 0 to 255
     MEDIUM_TYPE = MEDIUMINT(unsigned=True)      # 0 to 4294967295
     HUGE_TYPE = BIGINT(unsigned=True)           # 0 to 18446744073709551615
-elif DB_ENGINE.startswith('postgres'):
+    FLOAT_TYPE = DOUBLE(precision=17, scale=14, asdecimal=False)
+elif conf.DB_ENGINE.startswith('postgres'):
     class NumInt(TypeDecorator):
         '''Modify Numeric type for integers'''
         impl = Numeric
@@ -79,6 +53,7 @@ elif DB_ENGINE.startswith('postgres'):
     TINY_TYPE = SmallInteger                    # -32768 to 32767
     MEDIUM_TYPE = Integer                       # -2147483648 to 2147483647
     HUGE_TYPE = NumInt(precision=20, scale=0)   # up to 20 digits
+    FLOAT_TYPE = DOUBLE_PRECISION(asdecimal=False)
 else:
     class TextInt(TypeDecorator):
         '''Modify Text type for integers'''
@@ -93,15 +68,16 @@ else:
     TINY_TYPE = SmallInteger
     MEDIUM_TYPE = Integer
     HUGE_TYPE = TextInt
+    FLOAT_TYPE = Float(asdecimal=False)
 
-if config.SPAWN_ID_INT:
+if conf.SPAWN_ID_INT:
     ID_TYPE = BigInteger
 else:
     ID_TYPE = String(11)
 
 
 def get_engine():
-    return create_engine(DB_ENGINE)
+    return create_engine(conf.DB_ENGINE)
 
 
 def get_engine_name(session):
@@ -114,31 +90,7 @@ def combine_key(sighting):
 Base = declarative_base()
 
 
-class Bounds:
-    if config.BOUNDARIES:
-        boundaries = config.BOUNDARIES
-
-        @classmethod
-        def contain(cls, p):
-            return cls.boundaries.contains(Point(p))
-    elif config.STAY_WITHIN_MAP:
-        north = max(config.MAP_START[0], config.MAP_END[0])
-        south = min(config.MAP_START[0], config.MAP_END[0])
-        east = max(config.MAP_START[1], config.MAP_END[1])
-        west = min(config.MAP_START[1], config.MAP_END[1])
-
-        @classmethod
-        def contain(cls, p):
-            lat, lon = p
-            return (cls.south <= lat <= cls.north and
-                    cls.west <= lon <= cls.east)
-    else:
-        @staticmethod
-        def contain(p):
-            return True
-
-
-class SightingCache(object):
+class SightingCache:
     """Simple cache for storing actual sightings
 
     It's used in order not to make as many queries to the database.
@@ -149,7 +101,7 @@ class SightingCache(object):
 
     def add(self, sighting):
         self.store[sighting['spawn_id']] = sighting['expire_timestamp']
-        shared.SCHED.call_at(sighting['expire_timestamp'], self.remove, sighting['spawn_id'])
+        call_at(sighting['expire_timestamp'], self.remove, sighting['spawn_id'])
 
     def remove(self, spawn_id):
         try:
@@ -169,7 +121,7 @@ class SightingCache(object):
         return within_range
 
 
-class MysteryCache(object):
+class MysteryCache:
     """Simple cache for storing Pokemon with unknown expiration times
 
     It's used in order not to make as many queries to the database.
@@ -181,7 +133,7 @@ class MysteryCache(object):
     def add(self, sighting):
         key = combine_key(sighting)
         self.store[combine_key(sighting)] = [sighting['seen']] * 2
-        shared.SCHED.call_at(sighting['seen'] + 3510, self.remove, key)
+        call_at(sighting['seen'] + 3510, self.remove, key)
 
     def __contains__(self, raw_sighting):
         key = combine_key(raw_sighting)
@@ -199,7 +151,7 @@ class MysteryCache(object):
         del self.store[key]
         if last != first:
             encounter_id, spawn_id = key
-            shared.DB.add({
+            db_proc.DB_PROC.add({
                 'type': 'mystery-update',
                 'spawn': spawn_id,
                 'encounter': encounter_id,
@@ -207,26 +159,11 @@ class MysteryCache(object):
                 'last': last
             })
 
-    def update_db(self, session):
-        for key, times in self.store.items():
-            first, last = times
-            if last != first:
-                encounter_id, spawn_id = key
-                mystery = {
-                    'spawn': spawn_id,
-                    'encounter': encounter_id,
-                    'first': first,
-                    'last': last
-                }
-                try:
-                    update_mystery(session, mystery)
-                except Exception:
-                    session.rollback()
-                else:
-                    session.commit()
+    def items(self):
+        return self.store.items()
 
 
-class FortCache(object):
+class FortCache:
     """Simple cache for storing fort sightings"""
     def __init__(self):
         self.store = utils.load_pickle('forts') or {}
@@ -235,24 +172,15 @@ class FortCache(object):
         if sighting['type'] == 'pokestop':
             self.store[sighting['external_id']] = True
         else:
-            self.store[sighting['external_id']] = (
-                sighting['team'],
-                sighting['prestige'],
-                sighting['guard_pokemon_id'],
-            )
+            self.store[sighting['external_id']] = sighting['last_modified']
 
     def __contains__(self, sighting):
-        params = self.store.get(sighting['external_id'])
-        if not params:
+        existing = self.store.get(sighting['external_id'])
+        if not existing:
             return False
-        if sighting['type'] == 'pokestop':
+        if existing is True:
             return True
-        is_the_same = (
-            params[0] == sighting['team'] and
-            params[1] == sighting['prestige'] and
-            params[2] == sighting['guard_pokemon_id']
-        )
-        return is_the_same
+        return existing == sighting['last_modified']
 
     def pickle(self):
         utils.dump_pickle('forts', self.store)
@@ -271,8 +199,8 @@ class Sighting(Base):
     spawn_id = Column(ID_TYPE)
     expire_timestamp = Column(Integer, index=True)
     encounter_id = Column(HUGE_TYPE, index=True)
-    lat = Column(Float)
-    lon = Column(Float)
+    lat = Column(FLOAT_TYPE)
+    lon = Column(FLOAT_TYPE)
     atk_iv = Column(TINY_TYPE)
     def_iv = Column(TINY_TYPE)
     sta_iv = Column(TINY_TYPE)
@@ -295,8 +223,8 @@ class Mystery(Base):
     pokemon_id = Column(TINY_TYPE)
     spawn_id = Column(ID_TYPE, index=True)
     encounter_id = Column(HUGE_TYPE, index=True)
-    lat = Column(Float)
-    lon = Column(Float)
+    lat = Column(FLOAT_TYPE)
+    lon = Column(FLOAT_TYPE)
     first_seen = Column(Integer, index=True)
     first_seconds = Column(SmallInteger)
     last_seconds = Column(SmallInteger)
@@ -322,8 +250,8 @@ class Spawnpoint(Base):
     id = Column(Integer, primary_key=True)
     spawn_id = Column(ID_TYPE, unique=True, index=True)
     despawn_time = Column(SmallInteger, index=True)
-    lat = Column(Float)
-    lon = Column(Float)
+    lat = Column(FLOAT_TYPE)
+    lon = Column(FLOAT_TYPE)
     alt = Column(SmallInteger)
     updated = Column(Integer, index=True)
     duration = Column(TINY_TYPE)
@@ -334,8 +262,8 @@ class Fort(Base):
 
     id = Column(Integer, primary_key=True)
     external_id = Column(String(35), unique=True)
-    lat = Column(Float, index=True)
-    lon = Column(Float, index=True)
+    lat = Column(FLOAT_TYPE)
+    lon = Column(FLOAT_TYPE)
 
     sightings = relationship(
         'FortSighting',
@@ -349,7 +277,7 @@ class FortSighting(Base):
 
     id = Column(Integer, primary_key=True)
     fort_id = Column(Integer, ForeignKey('forts.id'))
-    last_modified = Column(Integer)
+    last_modified = Column(Integer, index=True)
     team = Column(TINY_TYPE)
     prestige = Column(MEDIUM_TYPE)
     guard_pokemon_id = Column(TINY_TYPE)
@@ -368,8 +296,8 @@ class Pokestop(Base):
 
     id = Column(Integer, primary_key=True)
     external_id = Column(String(35), unique=True)
-    lat = Column(Float, index=True)
-    lon = Column(Float, index=True)
+    lat = Column(FLOAT_TYPE, index=True)
+    lon = Column(FLOAT_TYPE, index=True)
 
 
 Session = sessionmaker(bind=get_engine())
@@ -389,49 +317,14 @@ def session_scope(autoflush=False):
         session.close()
 
 
-def get_spawns(session):
-    spawns = session.query(Spawnpoint)
-    mysteries = set()
-    spawns_dict = {}
-    despawn_times = {}
-    altitudes = {}
-    known_points = set()
-    for spawn in spawns:
-        point = (spawn.lat, spawn.lon)
-
-        # skip if point is not within boundaries (if applicable)
-        if not Bounds.contain(point):
-            continue
-
-        rounded = utils.round_coords(point, 3)
-        altitudes[rounded] = spawn.alt
-
-        if not spawn.updated or spawn.updated <= config.LAST_MIGRATION:
-            mysteries.add(point)
-            continue
-
-        if spawn.duration == 60:
-            spawn_time = spawn.despawn_time
-        else:
-            spawn_time = (spawn.despawn_time + 1800) % 3600
-
-        despawn_times[spawn.spawn_id] = spawn.despawn_time
-        spawns_dict[spawn.spawn_id] = (point, spawn_time)
-        if config.MORE_POINTS:
-            known_points.add(point)
-
-    spawns = OrderedDict(sorted(spawns_dict.items(), key=lambda k: k[1][1]))
-    return spawns, despawn_times, mysteries, altitudes, known_points
-
-
 def get_since():
     """Returns 'since' timestamp that should be used for filtering"""
-    return time.mktime(config.REPORT_SINCE.timetuple())
+    return time.mktime(conf.REPORT_SINCE.timetuple())
 
 
 def get_since_query_part(where=True):
     """Returns WHERE part of query filtering records before set date"""
-    if config.REPORT_SINCE:
+    if conf.REPORT_SINCE:
         return '{noun} expire_timestamp > {since}'.format(
             noun='WHERE' if where else 'AND',
             since=get_since(),
@@ -471,18 +364,22 @@ def add_spawnpoint(session, pokemon):
     # Check if the same entry already exists
     spawn_id = pokemon['spawn_id']
     new_time = pokemon['expire_timestamp'] % 3600
-    existing_time = shared.SPAWNS.get_despawn_seconds(spawn_id)
-    if new_time == existing_time:
-        return
+    try:
+        if new_time == spawns.despawn_times[spawn_id]:
+            return
+    except KeyError:
+        pass
     existing = session.query(Spawnpoint) \
         .filter(Spawnpoint.spawn_id == spawn_id) \
         .first()
     now = round(time.time())
+    point = pokemon['lat'], pokemon['lon']
+    spawns.add_known(spawn_id, new_time, point)
     if existing:
         existing.updated = now
 
         if (existing.despawn_time is None or
-                existing.updated < config.LAST_MIGRATION):
+                existing.updated < conf.LAST_MIGRATION):
             widest = get_widest_range(session, spawn_id)
             if widest and widest > 1710:
                 existing.duration = 60
@@ -490,11 +387,8 @@ def add_spawnpoint(session, pokemon):
             return
 
         existing.despawn_time = new_time
-        shared.SPAWNS.add_despawn(spawn_id, new_time)
     else:
-        point = (pokemon['lat'], pokemon['lon'])
-        altitude = shared.SPAWNS.get_altitude(point)
-        shared.SPAWNS.add_despawn(spawn_id, new_time)
+        altitude = spawns.get_altitude(point)
         widest = get_widest_range(session, spawn_id)
 
         if widest and widest > 1710:
@@ -512,20 +406,19 @@ def add_spawnpoint(session, pokemon):
             duration=duration
         )
         session.add(obj)
-        shared.SPAWNS.add_known(point)
 
 
 def add_mystery_spawnpoint(session, pokemon):
     # Check if the same entry already exists
     spawn_id = pokemon['spawn_id']
-    point = (pokemon['lat'], pokemon['lon'])
-    if shared.SPAWNS.db_has(point):
+    point = pokemon['lat'], pokemon['lon']
+    if point in spawns.unknown:
         return
     existing = session.query(exists().where(
         Spawnpoint.spawn_id == spawn_id)).scalar()
     if existing:
         return
-    altitude = shared.SPAWNS.get_altitude(point)
+    altitude = spawns.get_altitude(point)
 
     obj = Spawnpoint(
         spawn_id=spawn_id,
@@ -538,8 +431,8 @@ def add_mystery_spawnpoint(session, pokemon):
     )
     session.add(obj)
 
-    if Bounds.contain(point):
-        shared.SPAWNS.add_mystery(point)
+    if point in bounds:
+        spawns.add_unknown(point)
 
 
 def add_mystery(session, pokemon):
@@ -592,9 +485,7 @@ def add_fort_sighting(session, raw_fort):
     if fort.id:
         existing = session.query(exists().where(and_(
             FortSighting.fort_id == fort.id,
-            FortSighting.team == raw_fort['team'],
-            FortSighting.prestige == raw_fort['prestige'],
-            FortSighting.guard_pokemon_id == raw_fort['guard_pokemon_id']
+            FortSighting.last_modified == raw_fort['last_modified']
         ))).scalar()
         if existing:
             # Why is it not in the cache? It should be there!
@@ -641,10 +532,13 @@ def update_mystery(session, mystery):
     encounter.seen_range = mystery['last'] - mystery['first']
 
 
-def get_sightings(session):
-    return session.query(Sighting) \
-        .filter(Sighting.expire_timestamp > time.time()) \
-        .all()
+def get_sightings(session, after_id=0):
+    q = session.query(Sighting) \
+        .filter(Sighting.expire_timestamp > time.time(),
+                Sighting.id > after_id)
+    if conf.MAP_FILTER_IDS:
+        q = q.filter(~Sighting.pokemon_id.in_(conf.MAP_FILTER_IDS))
+    return q.all()
 
 
 def get_spawn_points(session):
@@ -693,7 +587,7 @@ def get_forts(session):
 def get_session_stats(session):
     query = session.query(func.min(Sighting.expire_timestamp),
         func.max(Sighting.expire_timestamp))
-    if config.REPORT_SINCE:
+    if conf.REPORT_SINCE:
         query = query.filter(Sighting.expire_timestamp > get_since())
     min_max_result = query.one()
     length_hours = (min_max_result[1] - min_max_result[0]) // 3600
@@ -707,18 +601,10 @@ def get_session_stats(session):
     }
 
 
-def get_despawn_time(session, spawn_id):
-    spawn_time = session.query(Spawnpoint.despawn_time) \
-        .filter(Spawnpoint.spawn_id == spawn_id) \
-        .filter(Spawnpoint.updated > config.LAST_MIGRATION) \
-        .scalar()
-    return spawn_time
-
-
 def get_first_last(session, spawn_id):
     result = session.query(func.min(Mystery.first_seconds), func.max(Mystery.last_seconds)) \
         .filter(Mystery.spawn_id == spawn_id) \
-        .filter(Mystery.first_seen > config.LAST_MIGRATION) \
+        .filter(Mystery.first_seen > conf.LAST_MIGRATION) \
         .first()
     return result
 
@@ -726,7 +612,7 @@ def get_first_last(session, spawn_id):
 def get_widest_range(session, spawn_id):
     largest = session.query(func.max(Mystery.seen_range)) \
         .filter(Mystery.spawn_id == spawn_id) \
-        .filter(Mystery.first_seen > config.LAST_MIGRATION) \
+        .filter(Mystery.first_seen > conf.LAST_MIGRATION) \
         .scalar()
     return largest
 
@@ -764,7 +650,7 @@ def get_punch_card(session):
     query = session.query(cast(Sighting.expire_timestamp / 300, Integer).label('ts_date'), func.count('ts_date')) \
         .group_by('ts_date') \
         .order_by('ts_date')
-    if config.REPORT_SINCE:
+    if conf.REPORT_SINCE:
         query = query.filter(Sighting.expire_timestamp > get_since())
     results = tuple(query)
     results_dict = {r[0]: r[1] for r in results}
@@ -777,7 +663,7 @@ def get_punch_card(session):
 def get_top_pokemon(session, count=30, order='DESC'):
     query = session.query(Sighting.pokemon_id, func.count(Sighting.pokemon_id).label('how_many')) \
         .group_by(Sighting.pokemon_id)
-    if config.REPORT_SINCE:
+    if conf.REPORT_SINCE:
         query = query.filter(Sighting.expire_timestamp > get_since())
     if order == 'DESC':
         query = query.order_by(desc('how_many')).limit(count)
@@ -790,11 +676,11 @@ def get_pokemon_ranking(session):
     ranking = []
     query = session.query(Sighting.pokemon_id, func.count(Sighting.pokemon_id).label('how_many')) \
         .group_by(Sighting.pokemon_id)
-    if config.REPORT_SINCE:
+    if conf.REPORT_SINCE:
         query = query.filter(Sighting.expire_timestamp > get_since())
     query = query.order_by(asc('how_many'))
     db_ids = [r[0] for r in query]
-    for pokemon_id in range(1, 152):
+    for pokemon_id in range(1, 252):
         if pokemon_id not in db_ids:
             ranking.append(pokemon_id)
     ranking.extend(db_ids)
@@ -805,18 +691,37 @@ def get_sightings_per_pokemon(session):
     query = session.query(Sighting.pokemon_id, func.count(Sighting.pokemon_id).label('how_many')) \
         .group_by(Sighting.pokemon_id) \
         .order_by('how_many')
-    if config.REPORT_SINCE:
+    if conf.REPORT_SINCE:
         query = query.filter(Sighting.expire_timestamp > get_since())
     return OrderedDict(query.all())
+
+
+def sightings_to_csv(since=None, output='sightings.csv'):
+    import csv
+
+    if since:
+        conf.REPORT_SINCE = since
+    with session_scope() as session:
+        sightings = get_sightings_per_pokemon(session)
+    od = OrderedDict()
+    for pokemon_id in range(1, 252):
+        if pokemon_id not in sightings:
+            od[pokemon_id] = 0
+    od.update(sightings)
+    with open(output, 'wt') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(('pokemon_id', 'count'))
+        for item in od.items():
+            writer.writerow(item)
 
 
 def get_rare_pokemon(session):
     result = []
 
-    for pokemon_id in config.RARE_IDS:
+    for pokemon_id in conf.RARE_IDS:
         query = session.query(Sighting) \
             .filter(Sighting.pokemon_id == pokemon_id)
-        if config.REPORT_SINCE:
+        if conf.REPORT_SINCE:
             query = query.filter(Sighting.expire_timestamp > get_since())
         count = query.count()
         if count > 0:
@@ -831,7 +736,7 @@ def get_nonexistent_pokemon(session):
         {report_since}
     '''.format(report_since=get_since_query_part()))
     db_ids = [r[0] for r in query.fetchall()]
-    for pokemon_id in range(1, 152):
+    for pokemon_id in range(1, 252):
         if pokemon_id not in db_ids:
             result.append(pokemon_id)
     return result
@@ -841,7 +746,7 @@ def get_all_sightings(session, pokemon_ids):
     # TODO: rename this and get_sightings
     query = session.query(Sighting) \
         .filter(Sighting.pokemon_id.in_(pokemon_ids))
-    if config.REPORT_SINCE:
+    if conf.REPORT_SINCE:
         query = query.filter(Sighting.expire_timestamp > get_since())
     return query.all()
 
@@ -884,7 +789,7 @@ def get_spawns_per_hour(session, pokemon_id):
 def get_total_spawns_count(session, pokemon_id):
     query = session.query(Sighting) \
         .filter(Sighting.pokemon_id == pokemon_id)
-    if config.REPORT_SINCE:
+    if conf.REPORT_SINCE:
         query = query.filter(Sighting.expire_timestamp > get_since())
     return query.count()
 
@@ -893,6 +798,6 @@ def get_all_spawn_coords(session, pokemon_id=None):
     points = session.query(Sighting.lat, Sighting.lon)
     if pokemon_id:
         points = points.filter(Sighting.pokemon_id == int(pokemon_id))
-    if config.REPORT_SINCE:
+    if conf.REPORT_SINCE:
         points = points.filter(Sighting.expire_timestamp > get_since())
     return points.all()

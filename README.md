@@ -45,25 +45,26 @@ Since it uses [Leaflet](http://leafletjs.com/) for mapping, the appearance and d
 1. Install Python 3.5 or later (3.6 is recommended)
 2. `git clone --recursive https://github.com/Noctem/Monocle.git`
   * Optionally install a custom icon package from elsewhere
-3. Copy `config.example.py` to `monocle/config.py` and customize it with your accounts, location, database information, and any other relevant settings. The comments in the config example provide some information about the options.
-4. `pip3 install -r requirements.txt`
+3. Copy *config.example.py* to *monocle/config.py* and customize it with your location, database information, and any other relevant settings. The comments in the config example provide some information about the options.
+4. Fill in *accounts.example.csv* with your own accounts and save it as *accounts.csv*.
+  * You only need to fill in the usernames and passwords, the other columns will be generated for you if left blank.
+5. `pip3 install -r requirements.txt`
   * Optionally `pip3 install` additional packages listed in optional-requirements
-    * *pushbullet.py* is required for pushbullet notifications
-    * *python-twitter* is required for twitter notifications
-    * *stem* is required for proxy circuit swapping
-    * *shapely* is required for landmarks or spawnpoint scan boundaries
-    * *selenium* (and [ChromeDriver](https://sites.google.com/a/chromium.org/chromedriver/)) are required for solving CAPTCHAs
+    * *asyncpushbullet* is required for PushBullet notifications
+    * *peony-twitter* is required for Twitter notifications
+    * *shapely* is required for landmarks or boundary polygons
+    * *selenium* (and [ChromeDriver](https://sites.google.com/a/chromium.org/chromedriver/)) are required for manually solving CAPTCHAs
     * *uvloop* provides better event loop performance
     * *pycairo* is required for generating IV/move images
     * *mysqlclient* is required for using a MySQL database
     * *psycopg2* is required for using a PostgreSQL database
-    * *requests* is required for using webhooks
     * *aiosocks* is required for using SOCKS proxies
     * *cchardet* and *aiodns* provide better performance with aiohttp
     * *numba* provides better performance through JIT compilation
     * *sanic* and *asyncpg* (and a Postgres DB) are required for web-sanic
-5. Run `python3 create_db.py` from the command line
-6. Run `python3 scan.py`
+    * *ujson* for better JSON encoding and decoding performance
+6. Run `python3 create_db.py` from the command line
+7. Run `python3 scan.py`
   * Optionally run the live map interface and reporting system: `python3 web.py`
 
 
@@ -90,6 +91,6 @@ The gyms statistics server is in a separate file, because it's intended to be sh
 
 See [LICENSE](LICENSE).
 
-This project is based on the coroutines branch of [pokeminer](https://github.com/modrzew/pokeminer/tree/coroutines) (now discontinued). *Pokeminer* was originally based on an early version of [PokemonGo-Map](https://github.com/AHAAAAAAA/PokemonGo-Map), but no longer shares any code with it. It uses my [pogo_async](https://github.com/Noctem/pgoapi), my fork of pgoapi which uses *aiohttp* for asynchronous network requests.
+This project is based on the coroutines branch of [pokeminer](https://github.com/modrzew/pokeminer/tree/coroutines) (now discontinued). *Pokeminer* was originally based on an early version of [PokemonGo-Map](https://github.com/AHAAAAAAA/PokemonGo-Map), but no longer shares any code with it. It uses [aiopogo](https://github.com/Noctem/aiopogo), my fork of pgoapi which uses *aiohttp* for asynchronous network requests.
 
 The [excellent image](https://darkestnight.deviantart.com/art/A-Distinguished-Pokeman-208009200) near the top of this README was painted by [darkestnight](https://darkestnight.deviantart.com/).
